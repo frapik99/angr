@@ -14,6 +14,7 @@ import claripy
 
 from .errors import AngrSyscallError, AngrUnsupportedSyscallError, AngrCallableError, AngrSimOSError
 from .tablespecs import StringTableSpec
+from .project import Hook
 
 l = logging.getLogger("angr.simos")
 
@@ -957,6 +958,10 @@ class SimCGC(SimOS):
 
 
 class SimWindows(SimOS):
+    def configure_project(self):
+        self.proj.hook_symbol('LoadLibraryExW', Hook(LoadLibrary, proj=self.proj))
+        self.proj.hook_symbol('GetProcAddress', Hook(GetProcAddress, proj=self.proj))
+
     def state_entry(self, args=None, **kwargs):
         if args is None: args = []
         state = super(SimWindows, self).state_entry(**kwargs)
@@ -1068,12 +1073,48 @@ class _kernel_user_helper_get_tls(SimProcedure):
         self.state.regs.r0 = ld.tls_object.user_thread_pointer
         return
 
+
+# Windows stuff
+
+
+class LoadLibrary(SimProcedure):
+    CALLEE_CLEANUP = True
+    def run(self, lib, flag1, flag2, proj=None):
+        return 1
+
+class GetProcAddress(SimProcedure):
+    CALLEE_CLEANUP = True
+    def run(self, lib, name_addr, proj=None):
+        name = self.state.mem[name_addr].string.concrete
+        addr = proj._extern_obj.get_pseudo_addr(name)
+        print 'Getting address for', name
+        if not proj.is_hooked(addr):
+            return_val = None
+            num_args = 0
+            if name == 'InitializeCriticalSectionEx':
+                num_args = 3
+                return_val = 1
+            elif name == 'FlsAlloc':
+                num_args = 1
+                return_val = 1
+            elif name == 'FlsSetValue':
+                num_args = 2
+                return_val = 1
+
+            cc = proj.factory.cc_from_arg_kinds([False]*num_args)
+            cc.CALLEE_CLEANUP = True
+            proj.hook(addr, Hook(SimProcedures['stubs']['ReturnUnconstrained'], cc=cc, resolves=name, return_val=return_val))
+        return addr
+
+# Generic stuff
+
 class CallReturn(SimProcedure):
     NO_RET = True
 
     def run(self):
         l.info("A factory.call_state-created path returned!")
         return
+
 
 
 os_mapping = defaultdict(lambda: SimOS)
